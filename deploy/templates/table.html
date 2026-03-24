@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <title>LASTMILE Tracking | 실시간 추적</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root { --primary: #002d5b; --success: #10b981; --bg: #f0f2f5; }
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, 'Malgun Gothic', sans-serif; margin: 0; background: var(--bg); color: #333; }
+        
+        /* Header */
+        header { background: var(--primary); color: white; padding: 15px; position: sticky; top: 0; z-index: 1000; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        header h1 { margin: 0; font-size: 1.2rem; }
+        header p { margin: 0; font-size: 0.8rem; opacity: 0.8; }
+
+        .main-container { padding: 10px; display: flex; flex-direction: column; gap: 10px; max-width: 1600px; margin: auto; }
+
+        /* Controls */
+        .card { background: white; border-radius: 10px; padding: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .control-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-size: 0.8rem; font-weight: bold; color: #666; }
+        select, button { width: 100%; height: 45px; border-radius: 8px; border: 1px solid #ddd; font-size: 0.9rem; font-weight: 600; background: white; }
+        .btn-export { background: var(--success); color: white; border: none; cursor: pointer; }
+
+        /* Map & Table */
+        .content-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+        #map { height: 400px; border-radius: 10px; z-index: 1; }
+        
+        /* Chỉnh lại để cuộn ngang trên mobile, đảm bảo không mất cột */
+        .table-container { overflow-x: auto; background: white; border-radius: 10px; }
+        table { width: 100%; border-collapse: collapse; min-width: 700px; } /* Đặt min-width để các cột không bị ép nhỏ quá */
+        th { background: #f8f9fa; padding: 12px 8px; font-size: 0.85rem; border-bottom: 2px solid #eee; }
+        td { padding: 10px 8px; text-align: center; border-bottom: 1px solid #f0f0f0; font-size: 0.85rem; }
+        
+        .status-fixed { color: var(--success); font-weight: bold; }
+        .status-nofix { color: #e63946; font-weight: bold; }
+        .badge { background: #eef2f7; padding: 4px 8px; border-radius: 5px; font-family: monospace; font-weight: bold; }
+
+        /* PC Layout */
+        @media (min-width: 992px) {
+            header h1 { font-size: 1.5rem; }
+            .main-container { padding: 20px; gap: 20px; }
+            .controls { grid-template-columns: 250px 250px 1fr 250px; align-items: end; }
+            .content-grid { grid-template-columns: 3fr 2fr; height: 600px; }
+            #map { height: 100%; }
+            .table-container { height: 100%; overflow-y: auto; }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div style="max-width: 1600px; margin: auto; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <h1>LASTMILE GPS Tracking</h1>
+            <p>실시간 차량 관제 시스템 (Real-time Fleet)</p>
+        </div>
+        <div id="count-box" style="text-align: right; font-weight: bold; font-size: 0.8rem;">
+            Devices: 0
+        </div>
+    </div>
+</header>
+
+<div class="main-container">
+    <div class="card controls">
+        <div class="control-group">
+            <label>VIEW DEVICE (보기)</label>
+            <select id="view-filter" onchange="updateData()">
+                <option value="all">Show All (전체보기)</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label>EXPORT DATA (내보내기)</label>
+            <select id="export-device">
+                <option value="all">All Devices (전체)</option>
+            </select>
+        </div>
+        <div class="control-group" style="grid-column: span 2 / auto;">
+            <button class="btn-export" onclick="exportCSV()">📥 DOWNLOAD CSV (데이터 다운로드)</button>
+        </div>
+    </div>
+
+    <div class="content-grid">
+        <div id="map" class="card"></div>
+        
+        <div class="card table-container">
+            <h3 style="margin-top: 0; font-size: 1rem;">Live Telemetry (실시간 로그)</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time (시간)</th>
+                        <th>ID (장치)</th>
+                        <th>Lat (위도)</th>
+                        <th>Lon (경도)</th>
+                        <th>Sats (위성)</th>
+                        <th>HDOP</th>
+                        <th>Status (상태)</th>
+                    </tr>
+                </thead>
+                <tbody id="data-table"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    var map = L.map('map', { zoomControl: false }).setView([37.456, 126.705], 13);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+    var markers = {};
+    var knownDevices = new Set();
+    var firstZoom = true;
+
+    function updateData() {
+        let filter = document.getElementById('view-filter').value;
+        fetch(`./api/table?filter=${filter}`)
+            .then(res => res.json())
+            .then(data => {
+                let html = '';
+                let bounds = [];
+                let activeNow = new Set();
+
+                data.forEach((row, index) => {
+                    let devId = row.device_id;
+                    let isFix = row.lat !== 0;
+
+                    if (!knownDevices.has(devId)) {
+                        knownDevices.add(devId);
+                        ["view-filter", "export-device"].forEach(id => {
+                            let opt = new Option(devId, devId);
+                            document.getElementById(id).add(opt);
+                        });
+                    }
+
+                    // Tải 20 dòng để tránh lag trên điện thoại
+                    if (index < 20) {
+                        html += `<tr>
+                            <td style="color:#888">${row.readable_time.split(' ')[1]}</td>
+                            <td><span class="badge">${devId}</span></td>
+                            <td>${row.lat.toFixed(6)}</td>
+                            <td>${row.lon.toFixed(6)}</td>
+                            <td>${row.satellites}</td>
+                            <td>${row.hdop}</td>
+                            <td class="${isFix?'status-fixed':'status-nofix'}">${isFix?'FIX':'NO'}</td>
+                        </tr>`;
+                    }
+
+                    if (isFix && !activeNow.has(devId)) {
+                        activeNow.add(devId);
+                        if (filter === 'all' || filter === devId) {
+                            let pos = [row.lat, row.lon];
+                            bounds.push(pos);
+                            if (markers[devId]) {
+                                markers[devId].setLatLng(pos);
+                            } else {
+                                markers[devId] = L.marker(pos).addTo(map)
+                                    .bindTooltip(devId, {permanent:true, direction:'top', offset: [0, -10]});
+                            }
+                        }
+                    }
+                });
+
+                document.getElementById('data-table').innerHTML = html;
+                document.getElementById('count-box').innerText = `ACTIVE: ${knownDevices.size}`;
+
+                for (let id in markers) {
+                    if (filter !== 'all' && id !== filter) map.removeLayer(markers[id]);
+                    else if (!map.hasLayer(markers[id])) markers[id].addTo(map);
+                }
+
+                if (firstZoom && bounds.length > 0) {
+                    map.fitBounds(bounds, {padding:[30,30]});
+                    firstZoom = false;
+                }
+            });
+    }
+
+    function exportCSV() {
+        let d = document.getElementById('export-device').value;
+        window.location.href = `./api/export?device=${d}`;
+    }
+
+    setInterval(updateData, 2000);
+    updateData();
+</script>
+</body>
+</html>
